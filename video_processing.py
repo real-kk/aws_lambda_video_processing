@@ -1,8 +1,14 @@
+import json
+import boto3
 import cv2
-import os
 from azure.cognitiveservices.vision.face import FaceClient
 from msrest.authentication import CognitiveServicesCredentials
-import key # for secret key
+import uuid
+from urllib.parse import unquote_plus
+import os
+import key
+
+s3 = boto3.client('s3', region_name="ap-northeast-2")
 
 def getRectangle(faceDictionary):
     rect = faceDictionary.face_rectangle
@@ -19,74 +25,88 @@ def drawRectangleAndText(frame, emotion_str, tmp_rectangle):
         cv2.putText(frame, emotion, (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.5, 1, 2)
     cv2.rectangle(frame, tmp_rectangle[0], tmp_rectangle[1], (0, 0, 255), 2)
 
-KEY = key.KEY
-ENDPOINT = key.ENDPOINT
+def cv2_processing(key, download_path):
 
-face_client = FaceClient(ENDPOINT, CognitiveServicesCredentials(KEY))
+    KEY = key.KEY
+    ENDPOINT = key.ENDPOINT
+    
+    face_client = FaceClient(ENDPOINT, CognitiveServicesCredentials(KEY))
+    VIDEO_FILE_PATH = download_path
+    cap = cv2.VideoCapture(VIDEO_FILE_PATH)
+    
+    if cap.isOpened() == False:
+        print ('Can\'t open the video (%d)' % (VIDEO_FILE_PATH))
+        exit()
+    
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
 
-VIDEO_FILE_PATH =  os.path.abspath('.') + '\\test.mp4'
-cap = cv2.VideoCapture(VIDEO_FILE_PATH)
-
-if cap.isOpened() == False:
-    print ('Can\'t open the video (%d)' % (VIDEO_FILE_PATH))
-    exit()
-
-width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-fps = cap.get(cv2.CAP_PROP_FPS)
-
-fourcc = cv2.VideoWriter_fourcc(*'XVID')
-
-filename = 'test.avi'
-out = cv2.VideoWriter(filename, fourcc, fps, (int(height), int(width)))
-
-face_cascade = cv2.CascadeClassifier()
-face_cascade.load('haarcascade_frontalface_alt.xml')
-
-cnt = 0
-tmp_rectangle = None
-while (True):
-    ret, frame = cap.read()
-    if width > height:
-        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-    if not ret:
-        break
-    grayframe = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur =  cv2.GaussianBlur(grayframe,(5,5), 0)
-    faces = face_cascade.detectMultiScale(blur, 1.8, 2, 0, (50, 50))
-
-    if not list(faces) and tmp_rectangle and tmp_emotion_str:
-        drawRectangleAndText(frame, tmp_emotion_str, tmp_rectangle)
-        out.write(frame)
-        continue
-
-    cnt += 1
-    if cnt % 5 != 0 and tmp_rectangle and tmp_emotion_str:
-        out.write(frame)
-        continue
-    cv2.imwrite('frame.jpg',frame)
-    with open(os.path.abspath('.') + '\\frame.jpg', "rb") as face_fd:
-        detected_faces = face_client.face.detect_with_stream(face_fd, return_face_attributes=["emotion"])
-        rectangle = getRectangle(detected_faces[0])
-        if not detected_faces:
+    filename = '/tmp/output_video.avi'
+    out = cv2.VideoWriter(filename, fourcc, fps, (int(height), int(width)))
+    face_cascade = cv2.CascadeClassifier()
+    face_cascade.load('haarcascade_frontalface_alt.xml')
+    
+    cnt = 0
+    tmp_rectangle = None
+    tmp_emotion_str = None
+    while True:
+        ret, frame = cap.read()
+        if width > height:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        if not ret:
+            break
+        grayframe = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blur =  cv2.GaussianBlur(grayframe,(5,5), 0)
+        faces = face_cascade.detectMultiScale(blur, 1.8, 2, 0, (50, 50))
+    
+        if not list(faces) and tmp_rectangle and tmp_emotion_str:
             drawRectangleAndText(frame, tmp_emotion_str, tmp_rectangle)
             out.write(frame)
             continue
-        emotion_str = ''
-        emotions = list(map(str, str(detected_faces[0].face_attributes.emotion).replace(' ', '').replace('\'', '').rstrip('}').lstrip('{').split(',')[1:]))
-        for emotion in emotions:
-            emotion_str += emotion + '\n'
-        drawRectangleAndText(frame, emotion_str, rectangle)
-        tmp_rectangle = rectangle
-        tmp_emotion_str = emotion_str
+    
+        cnt += 1
+        if cnt % 5 != 0 and tmp_rectangle and tmp_emotion_str:
+            out.write(frame)
+            continue
+        cv2.imwrite('/tmp/frame.jpg',frame)
+        with open('/tmp/frame.jpg', "rb") as face_fd:
+            detected_faces = face_client.face.detect_with_stream(face_fd, return_face_attributes=["emotion"])
+            if not detected_faces and tmp_emotion_str and tmp_rectangle:
+                drawRectangleAndText(frame, tmp_emotion_str, tmp_rectangle)
+                out.write(frame)
+                continue
+            rectangle = getRectangle(detected_faces[0])
+            emotion_str = ''
+            print(detected_faces[0].face_attributes.emotion)
+            emotions = list(map(str, str(detected_faces[0].face_attributes.emotion).replace(' ', '').replace('\'', '').rstrip('}').lstrip('{').split(',')[1:]))
+            for emotion in emotions:
+                emotion_str += emotion + '\n'
+            drawRectangleAndText(frame, emotion_str, rectangle)
+            tmp_rectangle = rectangle
+            tmp_emotion_str = emotion_str
+        if cv2.waitKey(25) == 13:
+            break
+        
+        out.write(frame)
 
-    # cv2.imshow('Video', frame)
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
 
-    if cv2.waitKey(25) == 13:
-        break
+def lambda_handler(event, context):
+    
+    bucket = event["Records"][0]["s3"]["bucket"]["name"] 
+    key = unquote_plus(event["Records"][0]["s3"]["object"]["key"]) 
+    download_path="/tmp/"+key
 
-    out.write(frame)
+    s3.download_file(bucket, key, download_path)   
 
-cap.release()
-out.release()
-cv2.destroyAllWindows()
+    result_file_path = cv2_processing(key, download_path)
+    video_file_path = '/tmp/output_video.avi'
+    s3.upload_file(video_file_path, 'processed-video-lambda', key, ExtraArgs={'ACL': 'public-read'})
+    
+    return {}
+
+

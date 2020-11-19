@@ -6,6 +6,7 @@ from msrest.authentication import CognitiveServicesCredentials
 import uuid
 from urllib.parse import unquote_plus
 import os
+import requests
 import key
 
 s3 = boto3.client('s3', region_name="ap-northeast-2")
@@ -79,10 +80,14 @@ def cv2_processing(key, download_path):
                 continue
             rectangle = getRectangle(detected_faces[0])
             emotion_str = ''
-            print(detected_faces[0].face_attributes.emotion)
             emotions = list(map(str, str(detected_faces[0].face_attributes.emotion).replace(' ', '').replace('\'', '').rstrip('}').lstrip('{').split(',')[1:]))
             for emotion in emotions:
                 emotion_str += emotion + '\n'
+                emotion_name, emotion_score = emotion.split(":")
+                emotion_name = emotion_name.strip('\'')
+                emotion_score = float(emotion_score)
+                emotion_dict[emotion_name] = emotion_dict.get(emotion_name, 0) + emotion_score
+            emotion_count += 1
             drawRectangleAndText(frame, emotion_str, rectangle)
             tmp_rectangle = rectangle
             tmp_emotion_str = emotion_str
@@ -94,6 +99,9 @@ def cv2_processing(key, download_path):
     cap.release()
     out.release()
     cv2.destroyAllWindows()
+
+emotion_dict = dict()
+emotion_count = 0
 
 def lambda_handler(event, context):
     
@@ -107,6 +115,13 @@ def lambda_handler(event, context):
     video_file_path = '/tmp/output_video.avi'
     s3.upload_file(video_file_path, 'processed-video-lambda', key, ExtraArgs={'ACL': 'public-read'})
     
+    for emotion in emotion_dict:
+            emotion_dict[emotion] /= emotion_count
+        url = 'http://ec2-13-209-32-113.ap-northeast-2.compute.amazonaws.com/tasks/sentiment/'
+        data = {'sentiments' : str(emotion_dict), 'key' : key}
+        response = requests.post(url=url, data=json.dumps(data), headers={'Content-Type': 'application/json'})
+        print(response.status_code)
+
     return {}
 
 

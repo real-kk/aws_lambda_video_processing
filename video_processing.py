@@ -27,6 +27,8 @@ def drawRectangleAndText(frame, emotion_str, tmp_rectangle):
     cv2.rectangle(frame, tmp_rectangle[0], tmp_rectangle[1], (0, 0, 255), 2)
 
 def cv2_processing(key, download_path):
+    global time_dict
+    global start_time
 
     KEY = key.KEY
     ENDPOINT = key.ENDPOINT
@@ -52,10 +54,15 @@ def cv2_processing(key, download_path):
     cnt = 0
     tmp_rectangle = None
     tmp_emotion_str = None
+    second = 0
+
     while True:
+        cnt += 1
+        current_time = int(time.time())
         ret, frame = cap.read()
         if width > height:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
         if not ret:
             break
         grayframe = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -80,14 +87,12 @@ def cv2_processing(key, download_path):
                 continue
             rectangle = getRectangle(detected_faces[0])
             emotion_str = ''
+            print(detected_faces[0].face_attributes.emotion)
             emotions = list(map(str, str(detected_faces[0].face_attributes.emotion).replace(' ', '').replace('\'', '').rstrip('}').lstrip('{').split(',')[1:]))
             for emotion in emotions:
                 emotion_str += emotion + '\n'
-                emotion_name, emotion_score = emotion.split(":")
-                emotion_name = emotion_name.strip('\'')
-                emotion_score = float(emotion_score)
-                emotion_dict[emotion_name] = emotion_dict.get(emotion_name, 0) + emotion_score
-            emotion_count += 1
+            time_dict[int(cnt/fps)] = emotion_str
+
             drawRectangleAndText(frame, emotion_str, rectangle)
             tmp_rectangle = rectangle
             tmp_emotion_str = emotion_str
@@ -99,28 +104,28 @@ def cv2_processing(key, download_path):
     cap.release()
     out.release()
     cv2.destroyAllWindows()
-
-emotion_dict = dict()
-emotion_count = 0
+    
+time_dict = dict()
+start_time = 0
 
 def lambda_handler(event, context):
     
-    bucket = event["Records"][0]["s3"]["bucket"]["name"] 
-    key = unquote_plus(event["Records"][0]["s3"]["object"]["key"]) 
+    bucket = event["Records"][0]["s3"]["bucket"]["name"] #Event 객체 내에 Bucket 확인
+    key = unquote_plus(event["Records"][0]["s3"]["object"]["key"]) #Event 객체 내에 파일 이름 확인
     download_path="/tmp/"+key
-
-    s3.download_file(bucket, key, download_path)   
-
-    result_file_path = cv2_processing(key, download_path)
-    video_file_path = '/tmp/output_video.avi'
-    s3.upload_file(video_file_path, 'processed-video-lambda', key, ExtraArgs={'ACL': 'public-read'})
+    print(download_path)
+    s3.download_file(bucket, key, download_path)   #/tmp/에 S3에 올라간 파일을 다운받음
     
-    for emotion in emotion_dict:
-            emotion_dict[emotion] /= emotion_count
-        url = 'http://ec2-13-209-32-113.ap-northeast-2.compute.amazonaws.com/tasks/sentiment/'
-        data = {'sentiments' : str(emotion_dict), 'key' : key}
-        response = requests.post(url=url, data=json.dumps(data), headers={'Content-Type': 'application/json'})
-        print(response.status_code)
+    result_file_path = cv2_processing(key,download_path)
+    video_file_path = '/tmp/output_video.avi'
+    s3.upload_file(video_file_path, 'processed-video-lambda', key, ExtraArgs={'ACL':'public-read'} )
+    
+    print(time_dict)
+
+    url = 'http://ec2-13-209-32-113.ap-northeast-2.compute.amazonaws.com/tasks/sentiment/'
+    data = {'sentiments' : time_dict, 'key' : key}
+    response = requests.post(url=url, data=json.dumps(data), headers={'Content-Type': 'application/json'})
+    print(response.status_code)
 
     return {}
 
